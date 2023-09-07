@@ -1,9 +1,24 @@
 # pdf2audiobook
+This repository is based on the pdf2audiobook project by Kaz Sato from Google.
+It is updated to work with Google Vertex AI and includes some improvements and additional features.
+
 Since the original documentations by [Kaz Sato](https://github.com/kazunori279/pdf2audiobook) and [Dale Markowitz](https://daleonai.com/pdf-to-audiobook) leave out some important steps that especially beginners to Google Cloud require, I decided to write a more in-depth documentation.
 
 First, open `functions/app/main.py` in your IDE.
 Google Cloud functions do not have a `main()` entry point, but a trigger function, in this case `p2a_gcs_trigger()`, which is invoked when the user uploads a new file to a specified Google Cloud bucket.
 I recommend the following Medium article about [Google Cloud functions](https://medium.com/google-cloud/setup-and-invoke-cloud-functions-using-python-e801a8633096).
+
+This script is invoked 3 times for a job.  
+- First, with the user-provided pdf.
+It is passed to the Vision API for text element extraction.
+- The second time, when the document vision is finished extracting the text elements. 
+The Vision API returns a json file, which is then passed to Vertex AI for labelling.
+- The third time is when Vertex AI has finished labelling the text elements as body, header etc. Vertex AI returns csv files.
+In this step, the ssml is generated from the text and synthesized as speech.
+
+Why?  
+The inference jobs might take a considerable amount of time to run.
+This way, the cloud function does not need to wait and check if the files have been created already.
 
 Make yourself familiar with the menu structure of Google Cloud.
 At the top, there are some pinned items that you can customize.

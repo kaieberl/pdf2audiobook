@@ -36,8 +36,11 @@ from google.cloud import texttospeech
 from google.cloud import aiplatform
 from google.protobuf import json_format
 
+from replace import replace_dict
+
 # generate PNGs for each page and labeled CSV for annotation
 ANNOTATION_MODE = False
+DEBUG_MODE = True
 
 # AutoML Tables configs
 compute_region = "us-central1"
@@ -64,6 +67,17 @@ speech_client = texttospeech.TextToSpeechClient()
 aiplatform.init(project=project_id, location=compute_region)
 
 
+def is_last_prediction_file(bucket, file_name):
+    # check if this is the last prediction
+    m = re.match(".*-([0-9]+)-of-([0-9]+).csv", file_name)
+    if m:
+        last_num = int(m.group(1))
+        total_num = int(m.group(2))
+        return last_num == total_num - 1
+
+    return False
+
+
 def p2a_gcs_trigger(file, context):
 
     # get bucket and blob
@@ -81,16 +95,18 @@ def p2a_gcs_trigger(file, context):
         return
 
     # predict
-    if file_name.lower().endswith(".json"):
+    elif file_name.lower().endswith(".json"):
         p2a_predict(bucket, file_blob)
         return
 
     # generate speech (or generate labels for annotation)
-    if file_name.lower().endswith(".csv") and "prediction.results" in file_name:
+    elif file_name.lower().endswith(".csv") and "prediction.results" in file_name:
         if ANNOTATION_MODE:
             p2a_generate_labels(bucket, file_blob)
         else:
-            p2a_generate_speech(bucket, file_blob)
+            if is_last_prediction_file(bucket, file_name):
+                merge_prediction_results(bucket, file_blob)
+                p2a_generate_speech(bucket, file_blob)
         return
 
 
@@ -262,13 +278,44 @@ def p2a_generate_speech(bucket, csv_blob):
     mp3_blob_list = generate_mp3_files(bucket, sorted_ids, text_dict, label_dict)
 
     # merge mp3 files
-    # merge_mp3_files(bucket, batch_id, mp3_blob_list)
+    merge_mp3_files(bucket, batch_id, mp3_blob_list)
 
     # delete prediction result (tables_1.csv) files
     folder_name = re.sub("/.*.csv", "", csv_blob.name)
     folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
+    if not DEBUG_MODE:
+        for b in folder_blobs:
+            b.delete()
+
+
+def merge_prediction_results(bucket, csv_blob):
+
+    # merge all csv files in csv_file_path
+    merged_csv_file_name = f"prediction.results.csv"
+    merged_csv_file_path = tempfile.gettempdir() + "/" + merged_csv_file_name
+    merged_df = None
+    folder_name = re.sub("/.*.csv", "", csv_blob.name)
+    folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
     for b in folder_blobs:
-        b.delete()
+        if b.name.endswith(".csv") and "prediction.results" in b.name:
+            # merge csv files
+            # get url for pandas.read_csv
+            url = "gs://{}/{}".format(bucket.name, b.name)
+            df = pd.read_csv(url)
+            if merged_df is None:
+                merged_df = df
+            else:
+                merged_df = pd.concat([merged_df, df])
+
+            # delete csv files
+            if not DEBUG_MODE:
+                b.delete()
+
+    # save the merged csv file
+    merged_df.to_csv(merged_csv_file_path, index=False)
+    merged_csv_blob = bucket.blob(merged_csv_file_name)
+    merged_csv_blob.upload_from_filename(merged_csv_file_path, content_type="text/csv")
+    print("Merged CSV file saved: {}".format(merged_csv_file_name))
 
 
 def parse_prediction_results(bucket, csv_blob):
@@ -284,6 +331,8 @@ def parse_prediction_results(bucket, csv_blob):
         id = row["id"]
         text = row["text"]
         text = text.replace("<", "")  # remove all '<'s for escaping in SSML
+        # remove reference numbers, e.g. [1], [2, 3], including preceding spaces
+        text = re.sub(r"\s*\[[0-9, ]+\]", "", text)
         text_dict[id] = text
 
         # build label_dict
@@ -334,6 +383,7 @@ def parse_prediction_results(bucket, csv_blob):
     # get batch_id (pdf id + the first page number)
     m = re.match("(.*-[0-9]+)-.*", first_id)
     batch_id = m.group(1)
+    print("Parsed prediction results for {}".format(batch_id))
 
     return batch_id, sorted_ids, text_dict, label_dict
 
@@ -348,8 +398,11 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
     prev_id = None
     for id in sorted_ids:
 
+        print("Processing ID:", id)  # For debugging
+
         # split as chunks with <4500 chars each
         if len(ssml) + len(text_dict[id]) > 4500:
+            print("Generating MP3 for SSML (Size exceeded 4500 characters)")  # For debugging
             mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
             mp3_blob_list.append(mp3_blob)
             ssml = ""
@@ -366,13 +419,18 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
 
     # generate speech for the remaining
     if ssml:
+        print("Generating MP3 for remaining SSML")  # For debugging
+        # make replacements defined in replace.py
+        for key, value in replace_dict.items():
+            ssml = ssml.replace(key, value)
+
         mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
         mp3_blob_list.append(mp3_blob)
     return mp3_blob_list
 
 
 def generate_mp3_for_ssml(bucket, id, ssml):
-
+    print("Started generating speech for {}".format(id))
     # set text and configs
     ssml = "<speak>\n" + ssml + "</speak>\n"
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
@@ -433,7 +491,8 @@ def merge_mp3_files(bucket, batch_id, mp3_blob_list):
     )
 
     # delete mp3 files
-    bucket.delete_blobs(mp3_blob_list)
+    if not DEBUG_MODE:
+        bucket.delete_blobs(mp3_blob_list)
     print("Ended merging mp3 files: {}".format(merged_mp3_file_name))
 
 
