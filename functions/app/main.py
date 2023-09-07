@@ -33,7 +33,7 @@ from pydub import AudioSegment
 from google.cloud import storage
 from google.cloud import vision
 from google.cloud import texttospeech
-from google.cloud import automl_v1beta1 as automl
+from google.cloud import aiplatform
 from google.protobuf import json_format
 
 # generate PNGs for each page and labeled CSV for annotation
@@ -41,7 +41,7 @@ ANNOTATION_MODE = False
 
 # AutoML Tables configs
 compute_region = "us-central1"
-model_display_name = "<YOUR MODEL DISPLAY NAME>"
+model_id = "<model_id>"
 
 # break length
 SECTION_BREAK = 2  # sec
@@ -57,11 +57,11 @@ FEATURE_CSV_HEADER = (
 )
 
 # ML API clients
-project_id = os.environ["GCP_PROJECT"]
+project_id = "<project_id>"
 vision_client = vision.ImageAnnotatorClient()
 storage_client = storage.Client()
 speech_client = texttospeech.TextToSpeechClient()
-automl_client = automl.TablesClient(project=project_id, region=compute_region)
+aiplatform.init(project=project_id, location=compute_region)
 
 
 def p2a_gcs_trigger(file, context):
@@ -86,7 +86,7 @@ def p2a_gcs_trigger(file, context):
         return
 
     # generate speech (or generate labels for annotation)
-    if file_name.lower().endswith("tables_1.csv"):
+    if file_name.lower().endswith(".csv") and "prediction.results" in file_name:
         if ANNOTATION_MODE:
             p2a_generate_labels(bucket, file_blob)
         else:
@@ -150,12 +150,14 @@ def p2a_predict(bucket, json_blob):
 
     # Query model
     print("Started AutoML batch prediction for {}".format(feature_file_name))
-    response = automl_client.batch_predict(
-        gcs_input_uris=gcs_input_uris,
-        gcs_output_uri_prefix=gcs_output_uri,
-        model_display_name=model_display_name,
+    model = aiplatform.Model(model_name=model_id)
+    batch_prediction_job = model.batch_predict(
+        instances_format="csv",
+        predictions_format="csv",
+        gcs_source=gcs_input_uris,
+        gcs_destination_prefix=gcs_output_uri,
     )
-    response.result()
+    batch_prediction_job.wait()
     print("Ended AutoML batch prediction for {}".format(feature_file_name))
     if not ANNOTATION_MODE:
         feature_blob.delete()
@@ -252,11 +254,15 @@ def p2a_generate_speech(bucket, csv_blob):
         bucket, csv_blob
     )
 
+    if not sorted_ids or len(sorted_ids) == 0:
+        print("No text to generate speech for {}".format(batch_id))
+        return
+
     # generate mp3 files with the parsed results
     mp3_blob_list = generate_mp3_files(bucket, sorted_ids, text_dict, label_dict)
 
     # merge mp3 files
-    merge_mp3_files(bucket, batch_id, mp3_blob_list)
+    # merge_mp3_files(bucket, batch_id, mp3_blob_list)
 
     # delete prediction result (tables_1.csv) files
     folder_name = re.sub("/.*.csv", "", csv_blob.name)
@@ -281,10 +287,10 @@ def parse_prediction_results(bucket, csv_blob):
         text_dict[id] = text
 
         # build label_dict
-        sc_other = float(row["label_other_score"])
-        sc_body = float(row["label_body_score"])
-        sc_caption = float(row["label_caption_score"])
-        sc_header = float(row["label_header_score"])
+        sc_other = float(row["label_other_scores"])
+        sc_body = float(row["label_body_scores"])
+        sc_caption = float(row["label_caption_scores"])
+        sc_header = float(row["label_header_scores"])
         #        if sc_other > 0.7:
         if sc_other > max(sc_header, sc_body, sc_caption):
             label_dict[id] = LABEL_OTHER
@@ -294,6 +300,10 @@ def parse_prediction_results(bucket, csv_blob):
             label_dict[id] = LABEL_CAPTION
         else:
             label_dict[id] = LABEL_BODY
+
+    if len(text_dict) == 0:
+        return None, None, None, None
+
     sorted_ids = sorted(text_dict.keys())
     first_id = sorted_ids[0]
 
@@ -355,8 +365,9 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
         prev_id = id
 
     # generate speech for the remaining
-    mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
-    mp3_blob_list.append(mp3_blob)
+    if ssml:
+        mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
+        mp3_blob_list.append(mp3_blob)
     return mp3_blob_list
 
 
@@ -364,20 +375,30 @@ def generate_mp3_for_ssml(bucket, id, ssml):
 
     # set text and configs
     ssml = "<speak>\n" + ssml + "</speak>\n"
-    synthesis_input = texttospeech.types.SynthesisInput(ssml=ssml)
-    voice = texttospeech.types.VoiceSelectionParams(
-        language_code="ja-JP", ssml_gender=texttospeech.enums.SsmlVoiceGender.FEMALE
+    synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="en-US",
+        name="en-US-Neural2-J",
     )
-    audio_config = texttospeech.types.AudioConfig(
-        audio_encoding=texttospeech.enums.AudioEncoding.MP3, speaking_rate=1.5
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        speaking_rate=1.0,
     )
 
     # generate speech
     try:
-        response = speech_client.synthesize_speech(synthesis_input, voice, audio_config)
+        response = speech_client.synthesize_speech(
+            request={"input": synthesis_input, "voice": voice, "audio_config": audio_config}
+        )
     except Exception as e:
-        print("Retrying speech generation...")  # sometimes the api returns 500 error
-        response = speech_client.synthesize_speech(synthesis_input, voice, audio_config)
+        print("Retrying speech generation with WaveNet...")
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="en-US",
+            name="en-US-Wavenet-J",
+        )
+        response = speech_client.synthesize_speech(
+            request={"input": synthesis_input, "voice": voice, "audio_config": audio_config}
+        )
 
     # save a MP3 file and delete the text file
     mp3_file_name = id + ".mp3"
