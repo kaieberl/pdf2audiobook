@@ -28,6 +28,7 @@ import locale
 import glob
 import time
 
+import pandas as pd
 from pydub import AudioSegment
 
 from google.cloud import storage
@@ -67,9 +68,17 @@ speech_client = texttospeech.TextToSpeechClient()
 aiplatform.init(project=project_id, location=compute_region)
 
 
-def is_last_prediction_file(bucket, file_name):
+def is_prediction_file(file_path) -> bool:
+    # check if file name has format 'prediction.results-00000-of-00020.csv'
+    file_name = os.path.basename(file_path)
+    if re.match("prediction.results-[0-9]+-of-[0-9]+.csv", file_name):
+        return True
+    return False
+
+
+def is_last(file_path):
     # check if this is the last prediction
-    m = re.match(".*-([0-9]+)-of-([0-9]+).csv", file_name)
+    m = re.match(".*-([0-9]+)-of-([0-9]+).csv", file_path)
     if m:
         last_num = int(m.group(1))
         total_num = int(m.group(2))
@@ -100,13 +109,15 @@ def p2a_gcs_trigger(file, context):
         return
 
     # generate speech (or generate labels for annotation)
-    elif file_name.lower().endswith(".csv") and "prediction.results" in file_name:
+    elif file_name.lower().endswith(".csv") and is_prediction_file(file_name):
         if ANNOTATION_MODE:
             p2a_generate_labels(bucket, file_blob)
         else:
-            if is_last_prediction_file(bucket, file_name):
+            if is_last(file_name):
                 merge_prediction_results(bucket, file_blob)
-                p2a_generate_speech(bucket, file_blob)
+
+                merged_csv_blob = bucket.get_blob("prediction.results.csv")
+                p2a_generate_speech(bucket, merged_csv_blob)
         return
 
 
@@ -175,7 +186,7 @@ def p2a_predict(bucket, json_blob):
     )
     batch_prediction_job.wait()
     print("Ended AutoML batch prediction for {}".format(feature_file_name))
-    if not ANNOTATION_MODE:
+    if not ANNOTATION_MODE and not DEBUG_MODE:
         feature_blob.delete()
 
 
@@ -297,7 +308,7 @@ def merge_prediction_results(bucket, csv_blob):
     folder_name = re.sub("/.*.csv", "", csv_blob.name)
     folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
     for b in folder_blobs:
-        if b.name.endswith(".csv") and "prediction.results" in b.name:
+        if b.name.endswith(".csv") and "prediction.results-" in b.name:
             # merge csv files
             # get url for pandas.read_csv
             url = "gs://{}/{}".format(bucket.name, b.name)
@@ -333,6 +344,11 @@ def parse_prediction_results(bucket, csv_blob):
         text = text.replace("<", "")  # remove all '<'s for escaping in SSML
         # remove reference numbers, e.g. [1], [2, 3], including preceding spaces
         text = re.sub(r"\s*\[[0-9, ]+\]", "", text)
+
+        # make replacements defined in replace.py
+        for key, value in replace_dict.items():
+            text = text.replace(key, value)
+
         text_dict[id] = text
 
         # build label_dict
@@ -398,11 +414,8 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
     prev_id = None
     for id in sorted_ids:
 
-        print("Processing ID:", id)  # For debugging
-
         # split as chunks with <4500 chars each
         if len(ssml) + len(text_dict[id]) > 4500:
-            print("Generating MP3 for SSML (Size exceeded 4500 characters)")  # For debugging
             mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
             mp3_blob_list.append(mp3_blob)
             ssml = ""
@@ -419,11 +432,6 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
 
     # generate speech for the remaining
     if ssml:
-        print("Generating MP3 for remaining SSML")  # For debugging
-        # make replacements defined in replace.py
-        for key, value in replace_dict.items():
-            ssml = ssml.replace(key, value)
-
         mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
         mp3_blob_list.append(mp3_blob)
     return mp3_blob_list
