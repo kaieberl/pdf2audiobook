@@ -169,7 +169,8 @@ def p2a_predict(bucket, json_blob):
     feature_blob = bucket.blob(feature_file_name)
     feature_blob.upload_from_string(csv)
     print("Feature CSV file saved: {}".format(feature_file_name))
-    json_blob.delete()
+    if not DEBUG_MODE:
+        json_blob.delete()
 
     # AutoML configs
     gcs_input_uris = ["gs://{}/{}".format(bucket.name, feature_file_name)]
@@ -195,6 +196,15 @@ def build_feature_csv(json_blob, pdf_id, first_page):
     # parse json
     json_string = json_blob.download_as_string()
     json_response = json_format.Parse(json_string, vision.types.AnnotateFileResponse())
+
+    # check if lang.txt file exists in bucket
+    lang_blob = storage_client.get_bucket(json_blob.bucket.name).get_blob("lang.txt")
+    if lang_blob is None:
+        language = json_response.responses[0].full_text_annotation.pages[0].property.detected_languages[0].language_code
+        # create lang file
+        lang_blob = storage_client.get_bucket(json_blob.bucket.name).blob("lang.txt")
+        lang_blob.upload_from_string(language)
+        print("Detected language: {}".format(language))
 
     # covert the json file to a bag of CSV lines
     csv = ""
@@ -297,6 +307,8 @@ def p2a_generate_speech(bucket, csv_blob):
     if not DEBUG_MODE:
         for b in folder_blobs:
             b.delete()
+        lang_blob = storage_client.get_bucket(bucket.name).get_blob("lang.txt")
+        lang_blob.delete()
 
 
 def merge_prediction_results(bucket, csv_blob):
@@ -308,10 +320,11 @@ def merge_prediction_results(bucket, csv_blob):
     folder_name = re.sub("/.*.csv", "", csv_blob.name)
     folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
     for b in folder_blobs:
-        if b.name.endswith(".csv") and "prediction.results-" in b.name:
+        if is_prediction_file(b.name):
             # merge csv files
             # get url for pandas.read_csv
             url = "gs://{}/{}".format(bucket.name, b.name)
+            print("Merging CSV file: {}".format(url))
             df = pd.read_csv(url)
             if merged_df is None:
                 merged_df = df
@@ -438,13 +451,20 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
 
 
 def generate_mp3_for_ssml(bucket, id, ssml):
+    voice_map = {
+        'en': ('en-US', 'en-US-Neural2-J'),
+        'de': ('de-DE', 'de-DE-Neural2-B'),
+        'ja': ('ja-JP', 'ja-JP-Neural2-C')
+    }
+
     print("Started generating speech for {}".format(id))
     # set text and configs
     ssml = "<speak>\n" + ssml + "</speak>\n"
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
+    language = bucket.get_blob("lang.txt").download_as_string().decode("utf-8")
     voice = texttospeech.VoiceSelectionParams(
-        language_code="en-US",
-        name="en-US-Neural2-J",
+        language_code=voice_map[language][0],
+        name=voice_map[language][1],
     )
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.MP3,
@@ -459,8 +479,8 @@ def generate_mp3_for_ssml(bucket, id, ssml):
     except Exception as e:
         print("Retrying speech generation with WaveNet...")
         voice = texttospeech.VoiceSelectionParams(
-            language_code="en-US",
-            name="en-US-Wavenet-J",
+            language_code=voice_map[language][0],
+            name=voice_map[language][1].replace('Neural2', 'Wavenet'),
         )
         response = speech_client.synthesize_speech(
             request={"input": synthesis_input, "voice": voice, "audio_config": audio_config}
