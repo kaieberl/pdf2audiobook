@@ -67,9 +67,10 @@ storage_client = storage.Client()
 speech_client = texttospeech.TextToSpeechClient()
 aiplatform.init(project=project_id, location=compute_region)
 
-# for local debugging with functions-framework
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(PROJECT_DIR, "pdf2audiobook.json")
+# TODO: (not working) if run locally via 'functions-framework', set GOOGLE_APPLICATION_CREDENTIALS
+if os.environ.get("FUNCTIONS_RUNTIME") == "local":
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(PROJECT_DIR, "pdf2audiobook.json")
 
 
 def p2a_debug(*args):
