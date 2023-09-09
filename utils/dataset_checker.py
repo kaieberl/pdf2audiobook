@@ -2,7 +2,7 @@
 import pandas as pd
 
 if __name__ == '__main__':
-    dataset_list = ['Alex-001-features_.csv', 'cryp-001-features_.csv', 'ebm-001-features_.csv', 'Neua-001-features_.csv', 'Neur-001-features_.csv', 'SMS-001-features_.csv']
+    dataset_list = ['<DATASET_1>.csv', '<DATASET_2>.csv', ...]
     for dataset in dataset_list:
         df = pd.read_csv(dataset)
         print(df['label'].unique())

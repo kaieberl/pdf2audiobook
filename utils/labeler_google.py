@@ -3,7 +3,7 @@ import tty
 import pandas as pd
 import termios
 
-OUTPUT_DIR = '/Users/k/Documents/Code/pdf2audiobook/out'
+OUTPUT_DIR = 'YOUR_OUTPUT_DIR'
 
 label_dict = {
     'h': 'header',
@@ -52,6 +52,6 @@ def write_data_to_csv(data, file_path):
 
 if __name__ == '__main__':
     # load from csv
-    df = pd.read_csv('Steu-001-features.csv')
+    df = pd.read_csv('XXXX-001-features.csv')
     df = label_data(df)
-    write_data_to_csv(df, 'google_ocr_dataset/Steu-001-features_.csv')
+    write_data_to_csv(df, 'path/to/your_output.csv')

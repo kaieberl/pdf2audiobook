@@ -67,6 +67,14 @@ storage_client = storage.Client()
 speech_client = texttospeech.TextToSpeechClient()
 aiplatform.init(project=project_id, location=compute_region)
 
+# for local debugging with functions-framework
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(PROJECT_DIR, "pdf2audiobook.json")
+
+
+def p2a_debug(*args):
+    p2a_gcs_trigger({"name": "prediction-ocr-model-2023_09_08T14_06_50_281Z/prediction.results-00019-of-00020.csv", "bucket": "BUCKET"}, None)
+
 
 def is_prediction_file(file_path) -> bool:
     # check if file name has format 'prediction.results-00000-of-00020.csv'
@@ -103,7 +111,7 @@ def p2a_gcs_trigger(file, context):
         p2a_ocr_pdf(bucket, file_blob)
         return
 
-    # predict
+    # predict element labels
     elif file_name.lower().endswith(".json"):
         p2a_predict(bucket, file_blob)
         return
@@ -114,12 +122,16 @@ def p2a_gcs_trigger(file, context):
             p2a_generate_labels(bucket, file_blob)
         else:
             if is_last(file_name):
-                merge_prediction_results(bucket, file_blob)
+                merged_file_name = merge_prediction_results(bucket, file_blob)
 
-                merged_csv_blob = bucket.get_blob("prediction.results.csv")
+                merged_csv_blob = bucket.get_blob(merged_file_name)
                 p2a_generate_speech(bucket, merged_csv_blob)
         return
 
+
+# ============================================================
+# OCR functions
+# ============================================================
 
 def p2a_ocr_pdf(bucket, pdf_blob):
 
@@ -152,6 +164,10 @@ def p2a_ocr_pdf(bucket, pdf_blob):
     if ANNOTATION_MODE:
         convert_pdf2png(bucket, pdf_blob)
 
+
+# ============================================================
+# Element labelling functions
+# ============================================================
 
 def p2a_predict(bucket, json_blob):
 
@@ -197,12 +213,12 @@ def build_feature_csv(json_blob, pdf_id, first_page):
     json_string = json_blob.download_as_string()
     json_response = json_format.Parse(json_string, vision.types.AnnotateFileResponse())
 
-    # check if lang.txt file exists in bucket
-    lang_blob = storage_client.get_bucket(json_blob.bucket.name).get_blob("lang.txt")
+    # check if lang file exists in bucket
+    lang_blob = storage_client.get_bucket(json_blob.bucket.name).get_blob(f"{pdf_id}.lang")
     if lang_blob is None:
         language = json_response.responses[0].full_text_annotation.pages[0].property.detected_languages[0].language_code
         # create lang file
-        lang_blob = storage_client.get_bucket(json_blob.bucket.name).blob("lang.txt")
+        lang_blob = storage_client.get_bucket(json_blob.bucket.name).blob(f"{pdf_id}.lang")
         lang_blob.upload_from_string(language)
         print("Detected language: {}".format(language))
 
@@ -284,6 +300,39 @@ def extract_paragraph_feature(para_id, para):
     return f
 
 
+def merge_prediction_results(bucket, csv_blob):
+
+    # merge all csv files in csv_file_path
+    folder_name = re.sub("/.*.csv", "", csv_blob.name)
+    merged_csv_file_name = f"{folder_name}.csv"
+    merged_csv_file_path = tempfile.gettempdir() + "/" + merged_csv_file_name
+    merged_df = None
+    folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
+    for b in folder_blobs:
+        if is_prediction_file(b.name):
+            # merge csv files
+            # get url for pandas.read_csv
+            url = "gs://{}/{}".format(bucket.name, b.name)
+            print("Merging CSV file: {}".format(url))
+            df = pd.read_csv(url)
+            if merged_df is None:
+                merged_df = df
+            else:
+                merged_df = pd.concat([merged_df, df])
+
+            # delete csv files
+            if not DEBUG_MODE:
+                b.delete()
+
+    # save the merged csv file
+    merged_df.to_csv(merged_csv_file_path, index=False)
+    merged_csv_blob = bucket.blob(merged_csv_file_name)
+    merged_csv_blob.upload_from_filename(merged_csv_file_path, content_type="text/csv")
+    print("Merged CSV file saved: {}".format(merged_csv_file_name))
+
+    return merged_csv_file_name
+
+
 def p2a_generate_speech(bucket, csv_blob):
 
     # parse prediction results from AutoML
@@ -307,39 +356,10 @@ def p2a_generate_speech(bucket, csv_blob):
     if not DEBUG_MODE:
         for b in folder_blobs:
             b.delete()
-        lang_blob = storage_client.get_bucket(bucket.name).get_blob("lang.txt")
+        # since all predictions have been merged into one csv
+        pdf_id = batch_id[:4]
+        lang_blob = storage_client.get_bucket(bucket.name).get_blob(f"{pdf_id}.lang")
         lang_blob.delete()
-
-
-def merge_prediction_results(bucket, csv_blob):
-
-    # merge all csv files in csv_file_path
-    merged_csv_file_name = f"prediction.results.csv"
-    merged_csv_file_path = tempfile.gettempdir() + "/" + merged_csv_file_name
-    merged_df = None
-    folder_name = re.sub("/.*.csv", "", csv_blob.name)
-    folder_blobs = storage_client.list_blobs(bucket, prefix=folder_name)
-    for b in folder_blobs:
-        if is_prediction_file(b.name):
-            # merge csv files
-            # get url for pandas.read_csv
-            url = "gs://{}/{}".format(bucket.name, b.name)
-            print("Merging CSV file: {}".format(url))
-            df = pd.read_csv(url)
-            if merged_df is None:
-                merged_df = df
-            else:
-                merged_df = pd.concat([merged_df, df])
-
-            # delete csv files
-            if not DEBUG_MODE:
-                b.delete()
-
-    # save the merged csv file
-    merged_df.to_csv(merged_csv_file_path, index=False)
-    merged_csv_blob = bucket.blob(merged_csv_file_name)
-    merged_csv_blob.upload_from_filename(merged_csv_file_path, content_type="text/csv")
-    print("Merged CSV file saved: {}".format(merged_csv_file_name))
 
 
 def parse_prediction_results(bucket, csv_blob):
@@ -461,7 +481,8 @@ def generate_mp3_for_ssml(bucket, id, ssml):
     # set text and configs
     ssml = "<speak>\n" + ssml + "</speak>\n"
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
-    language = bucket.get_blob("lang.txt").download_as_string().decode("utf-8")
+    pdf_id = id[:4]
+    language = bucket.get_blob(f"{pdf_id}.lang").download_as_string().decode("utf-8")
     voice = texttospeech.VoiceSelectionParams(
         language_code=voice_map[language][0],
         name=voice_map[language][1],
