@@ -448,8 +448,8 @@ def generate_mp3_files(bucket, sorted_ids, text_dict, label_dict):
     prev_id = None
     for id in sorted_ids:
 
-        # split as chunks with <4500 chars each
-        if len(ssml) + len(text_dict[id]) > 4500:
+        # split as chunks with <4500 bytes each
+        if len(ssml.encode("utf-8")) + len(text_dict[id].encode("utf-8")) > 4500:
             mp3_blob = generate_mp3_for_ssml(bucket, prev_id, ssml)
             mp3_blob_list.append(mp3_blob)
             ssml = ""

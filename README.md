@@ -64,6 +64,22 @@ Set `ANNOTATION` to `False` and deploy the cloud function again.
 
 You can get a list of your models with the command `gcloud ai models list`.
 
+To convert a pdf, just drop it into the bucket.
+You can also customize the voice and language in the `voice_map` variable.
+```python3
+voice_map = {
+    'en': ('en-US', 'en-US-Neural2-J'),
+    'de': ('de-DE', 'de-DE-Neural2-B'),
+    'ja': ('ja-JP', 'ja-JP-Neural2-C')
+}
+```
+Go to [https://cloud.google.com/text-to-speech](https://cloud.google.com/text-to-speech) to try out different voices and languages. Below the text box, there is a button to show the json request.
+E.g. to add a Spanish voice, add 
+```python3
+'es': ('es-ES', 'es-ES-Standard-A'),
+```
+To use a British english voice, replace `'en': ('en-US', 'en-US-Neural2-J'),` by `'en': ('en-GB', 'en-GB-Neural2-B'),`.
+
 ## Testing Google Cloud functions
 Since I couldn't get the arguments for the eventarc trigger to work (there seems to be not that much documentation on this topic), I used the following workaround to test the 3rd step (merge csv prediction files and generate speech)
 
@@ -72,22 +88,16 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.join(PROJECT_DIR, "<your_key_file>.json")
 
 
-def p2a_gcs_debug_trigger(arg):
-    bucket = storage_client.get_bucket("<your-bucket>")
-    file_blob = bucket.get_blob("your_folder/prediction.results-XXXXX-of-YYYYY.csv")
-    time.sleep(2)
-    merge_prediction_results(bucket, file_blob)
-
-    merged_csv_blob = bucket.get_blob("prediction.results.csv")
-    p2a_generate_speech(bucket, merged_csv_blob)
+def p2a_debug(*args):
+    p2a_gcs_trigger({"name": "prediction-ocr-model-2023_09_08T14_06_50_281Z/prediction.results-00019-of-00020.csv", "bucket": "BUCKET"}, None)
 ```
-Add the first 2 lines above the API client initializations (line 64) and the function below the `p2a_gcs_trigger()` function.
-Place your key file in the same folder as `main.py` and replace `<your_key_file>` with the name of your key file.
+Change the file name and bucket name accordingly, depending on which part of the trigger function you want to test.
+Place your key file in the same folder as `main.py` and name it `pdf2audiobook.json`.
 Your bucket name is the display name that you entered for your bucket, e.g. `p2a-bucket`.
-Upload the previously generated prediction result files from step 2, and pass the name of the _last_ prediction file (e.g. `prediction.results-00019-of-00020.csv`).
-Configure your IDE to run `--source=functions/app/main.py --target="p2a_gcs_debug_trigger" --signature-type=http --port=8080 --debug`.
+E.g. upload the previously generated prediction result files from step 2, and pass the name of the _last_ prediction file (e.g. `prediction.results-00019-of-00020.csv`).
+Configure your IDE to run `--source=functions/app/main.py --target="p2a_debug" --signature-type=http --port=8080 --debug`.
 This starts a web server on your local machine, port 8080.
-You can simulate a file upload by running the provided `test.sh` script in a terminal.
+You can simulate a file upload eventarc trigger event by running the provided `test.sh` script in a terminal.
 
 ## A note on costs
 (may change)
@@ -99,3 +109,8 @@ You can simulate a file upload by running the provided `test.sh` script in a ter
 
 So the only thing that might get expensive is the Vertex AI training.
 For me, this was included in the 90-day trial, but else this would have cost me 20 USD (1h, upgraded node).
+
+## Future work
+- hold out figure descriptions until the current paragraph is finished
+- include previous and successive element in labelling feature set
+- switch to Adobe Document API for text element extraction (is also free up to 500 PDF operations per month), but detects text more reliably
