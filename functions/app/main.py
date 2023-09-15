@@ -376,8 +376,8 @@ def parse_prediction_results(bucket, csv_blob):
         id = row["id"]
         text = row["text"]
         text = text.replace("<", "")  # remove all '<'s for escaping in SSML
-        # remove reference numbers, e.g. [1], [2, 3], including preceding spaces
-        text = re.sub(r"\s*\[[0-9, ]+\]", "", text)
+        # remove reference numbers, e.g. [1], [2, 3], [1-3] including preceding spaces
+        text = re.sub(r"\s*\[[0-9,-, ]+\]\s*", "", text)
 
         # make replacements defined in replace.py
         for key, value in replace_dict.items():
