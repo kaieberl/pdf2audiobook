@@ -1,4 +1,9 @@
 # pdf2audiobook
+
+**Update 15.09.2023:**  
+Meta has released [Nougat](https://github.com/facebookresearch/nougat), an academic document PDF parser that supports LaTeX math and tables.
+I will therefore create a new repository based on Nougat.
+
 This repository is based on the pdf2audiobook project by Kaz Sato from Google.
 It is updated to work with Google Vertex AI and includes some improvements and additional features.
 
@@ -113,4 +118,3 @@ For me, this was included in the 90-day trial, but else this would have cost me 
 ## Future work
 - hold out figure descriptions until the current paragraph is finished
 - include previous and successive element in labelling feature set
-- switch to Adobe Document API for text element extraction (is also free up to 500 PDF operations per month), but detects text more reliably
